@@ -55,7 +55,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       text: widget.webSocketManager.deviceId,
     );
     _serverUrlController = TextEditingController(
-      text: widget.webSocketManager.serverUrl,
+      text:
+          '${widget.webSocketManager.mqttHost}:${widget.webSocketManager.mqttPort}',
     );
     _isAdminMode = widget.isAdminMode;
     _updateConnectionStatus();
@@ -149,8 +150,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 16),
             _buildTextField(
               controller: _serverUrlController,
-              label: '伺服器位址',
-              hint: '例如: ws://your-server.com',
+              label: 'MQTT Broker (host:port)',
+              hint: '例如: 192.168.1.10:1883',
               icon: Icons.cloud,
             ),
             const SizedBox(height: 24),

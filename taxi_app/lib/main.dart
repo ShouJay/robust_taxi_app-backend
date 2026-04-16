@@ -86,10 +86,7 @@ class _AppContainerState extends State<AppContainer>
       final adminMode = prefs.getBool(AppConfig.adminModeKey) ?? false;
 
       // 2. 初始化管理器
-      _webSocketManager = WebSocketManager(
-        deviceId: deviceId,
-        serverUrl: AppConfig.wsUrl,
-      );
+      _webSocketManager = WebSocketManager(deviceId: deviceId);
 
       _downloadManager = DownloadManager(baseUrl: AppConfig.apiBaseUrl);
 
@@ -97,6 +94,11 @@ class _AppContainerState extends State<AppContainer>
         downloadManager: _downloadManager,
         webSocketManager: _webSocketManager,
       );
+
+      _webSocketManager.onDeleteLocalVideoCommand = (filename) async {
+        if (filename.isEmpty) return;
+        await _playbackManager.deleteVideo(filename);
+      };
 
       // 初始化位置服務
       _locationService = LocationService(webSocketManager: _webSocketManager);

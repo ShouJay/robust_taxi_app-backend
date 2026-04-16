@@ -3,7 +3,7 @@
 完整的後端系統，結合基於地理位置的廣告決策和實時 WebSocket 推送功能。
 
 **版本**: v2.0.0  
-**技術**: Python + Flask + Flask-SocketIO + MongoDB + WebSocket  
+**技術**: Python + Flask + MQTT (Mosquitto) + MongoDB  
 **完成日期**: 2025-10-17
 
 ---
@@ -77,8 +77,10 @@
 
 #### 手動操作
 ```bash
-# 啟動服務
+# 啟動服務（含 MongoDB + Mosquitto MQTT + Flask）
 docker-compose -f docker/docker-compose.yml up -d
+
+# MQTT：容器內主機名為 mosquitto，埠 1883；本機除錯時 App 請連線 <電腦區網IP>:1883
 
 # 初始化數據庫
 sleep 10

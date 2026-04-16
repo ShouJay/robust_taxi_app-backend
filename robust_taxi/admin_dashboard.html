@@ -939,9 +939,6 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-SmSRN1ogbH0GkM1Jr1cOGn97d8iRgx0G2v+rj0i0X6Y=" crossorigin=""></script>
 
-    <!-- Socket.IO 客戶端庫 -->
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    
     <script>
 
         const LOGIN_PAGE = 'login.html';
@@ -950,7 +947,7 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
             window.location.href = LOGIN_PAGE;
         }
 
-        // Socket.IO 連接
+        // 即時通道已改為 MQTT（車機）；網頁儀表板使用 REST 輪詢
         let socket = null;
         let sidebar = null;
         let sidebarOverlay = null;
@@ -986,6 +983,12 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
             loadDashboard();
             setupEventListeners();
             setLoginUserInfo();
+            setInterval(() => {
+                loadQrStats();
+                if (currentPage === 'dashboard' || currentPage === 'devices') {
+                    loadDashboard();
+                }
+            }, 15000);
         });
 
         // socket = io(SOCKETIO_URL, {
@@ -1001,51 +1004,8 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
         
 
         
-        // 初始化 WebSocket (使用 Socket.IO)
         function initWebSocket() {
-            try {
-                // 如果已經有連接，先斷開
-                if (socket) {
-                    socket.disconnect();
-                }
-                
-                // 建立 Socket.IO 連接
-                socket = io(SOCKETIO_URL, {
-                    transports: ['websocket'],
-                    reconnection: true,
-                    reconnectionDelay: 5000,
-                    reconnectionAttempts: Infinity
-                });
-                
-                socket.on('connect', function() {
-                    addLog('Socket.IO 連接已建立 (SID: ' + socket.id + ')', 'info');
-                });
-                
-                socket.on('disconnect', function() {
-                    addLog('Socket.IO 連接已斷開', 'warning');
-                });
-                
-                socket.on('connect_error', function(error) {
-                    addLog('Socket.IO 連接錯誤: ' + error.message, 'error');
-                });
-                
-                socket.on('connection_established', function(data) {
-                    addLog('服務器確認連接: ' + data.message, 'info');
-                });
-                
-                // 監聽設備連接/斷開事件
-                socket.on('device_status', function(data) {
-                    handleWebSocketMessage(data);
-                });
-                
-                // 監聽 QR Code 掃描事件
-                socket.on('qr_scan_event', function(data) {
-                    handleQRScanEvent(data);
-                });
-                
-            } catch (error) {
-                addLog('初始化 Socket.IO 失敗: ' + error.message, 'error');
-            }
+            addLog('後端即時通道為 MQTT；儀表板每 15 秒輪詢 REST 更新。', 'info');
         }
         
         // 處理 WebSocket 消息
@@ -1115,30 +1075,7 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
             container.innerHTML = html;
         }
 
-        // 3. 處理 Socket 即時更新
-        // 在 initWebSocket() 或 socket 連接成功後的地方確認有這段:
-        // 注意：如果你之前有寫 socket.on('stats_update', ...)，可以保留或整合，
-        // 但新的後端是發送 'qr_stats_update'
-        if (socket) {
-            socket.on('qr_stats_update', function(data) {
-                // data.counts = { shibuya: 10, tokyo_tower: 5 ... }
-                if (data.reset) {
-                    // 如果是歸零事件，重新載入最準
-                    loadQrStats();
-                } else if (data.counts) {
-                    // 更新畫面上所有的數字
-                    for (const [key, count] of Object.entries(data.counts)) {
-                        const el = document.getElementById(`qr-count-${key}`);
-                        if (el) {
-                            el.innerText = count;
-                            // 加個閃爍特效提示更新
-                            el.style.color = '#e74c3c';
-                            setTimeout(() => el.style.color = '#3498db', 500);
-                        }
-                    }
-                }
-            });
-        }
+        // 3. QR 統計改由上方 setInterval 輪詢 loadQrStats
 
         // 4. 歸零功能
         async function resetQrCount(key) {
@@ -1229,26 +1166,6 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
 
                 updateDualControlUI(statusData);
                 document.getElementById('embeddedQrCount').innerText = statsData.count;
-                
-                // 確保 Socket 監聽器已設置 (重用現有的 socket)
-                if(socket) {
-                    // 移除舊的監聽器避免重複
-                    socket.off('system_state_update');
-                    socket.off('stats_update');
-                    
-                    // 重新綁定
-                    socket.on('system_state_update', (data) => {
-                        addLog('收到系統狀態更新', 'info');
-                        updateDualControlUI(data);
-                    });
-
-                    socket.on('stats_update', (data) => {
-                        // 只在當前頁面是中控台時更新 UI，避免干擾
-                        if(currentPage === 'dualControl') {
-                            document.getElementById('embeddedQrCount').innerText = data.qr_scan_count;
-                        }
-                    });
-                }
             } catch (error) {
                 addLog('載入中控台數據失敗: ' + error.message, 'error');
             }
@@ -1608,6 +1525,9 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
                                 <span class="device-status status-online">線上</span>
                                 <button class="btn btn-primary btn-small" onclick="pushToDevice('${device.device_id}')">
                                     推送
+                                </button>
+                                <button class="btn btn-danger btn-small" onclick="promptDeleteLocalVideo('${device.device_id}')">
+                                    刪車機檔
                                 </button>
                             </div>
                         </div>
@@ -2562,11 +2482,41 @@ python tests/test_location_client.py taxi-AAB-1234-rooftop 5</pre>
                 return '<p>播放狀態：尚無資料</p>';
             }
             const state = detail.playback_state;
+            let queueHtml = '';
+            if (Array.isArray(state.queue) && state.queue.length > 0) {
+                queueHtml = '<p>插播隊列：' + state.queue.map(q => (q.videoFilename || q.filename || '-')).join(', ') + '</p>';
+            }
+            let localHtml = '';
+            if (Array.isArray(state.local_playlist) && state.local_playlist.length > 0) {
+                localHtml = '<p>本機清單：' + state.local_playlist.slice(0, 8).join(', ') + (state.local_playlist.length > 8 ? '…' : '') + '</p>';
+            }
             return `
                 <p>播放狀態：${renderPlaybackMode(state.mode)}</p>
                 <p>播放內容：${renderPlaybackMedia(state)}</p>
+                ${queueHtml}
+                ${localHtml}
                 <p>更新時間：${formatTimestamp(state.updated_at)}</p>
             `;
+        }
+
+        async function promptDeleteLocalVideo(deviceId) {
+            const fn = (prompt('輸入車機上要刪除的影片檔名（例如 video.mp4）') || '').trim();
+            if (!fn) return;
+            try {
+                const res = await fetch(API_BASE + '/devices/' + encodeURIComponent(deviceId) + '/commands/delete-local-video', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ video_filename: fn })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    addLog('已送出刪除指令：' + fn, 'success');
+                } else {
+                    addLog('刪除指令失敗：' + (data.message || res.status), 'error');
+                }
+            } catch (e) {
+                addLog('刪除指令錯誤：' + e.message, 'error');
+            }
         }
 
         function renderPlaybackMode(mode) {

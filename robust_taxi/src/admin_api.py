@@ -54,7 +54,7 @@ def cleanup_chunks(upload_id):
 
 def init_admin_api(
     db,
-    socketio,
+    mqtt_bridge,
     device_to_sid,
     connection_stats,
     active_connections,
@@ -66,10 +66,10 @@ def init_admin_api(
     
     Args:
         db: Database 實例
-        socketio: SocketIO 實例
-        device_to_sid: 設備到 SID 的映射
+        mqtt_bridge: MqttBridge 實例
+        device_to_sid: 設備在線映射（device_id -> True）
         connection_stats: 連接統計數據
-        active_connections: 活動連接映射
+        active_connections: 活動連接映射（device_id -> 連線資訊）
         device_campaign_state: 設備活動快取
         device_playback_state: 設備播放狀態快取
     """
@@ -98,10 +98,10 @@ def init_admin_api(
         try:
             active_devices = []
             
-            for sid, conn_info in active_connections.items():
+            for device_id, conn_info in active_connections.items():
                 active_devices.append({
                     'device_id': conn_info['device_id'],
-                    'sid': sid,
+                    'transport': 'mqtt',
                     'connected_at': conn_info['connected_at'],
                     'last_activity': conn_info['last_activity']
                 })
@@ -214,10 +214,8 @@ def init_admin_api(
             
             # 添加在線狀態和連接信息
             device['is_online'] = device_id in device_to_sid
-            if device['is_online']:
-                sid = device_to_sid[device_id]
-                if sid in active_connections:
-                    device['connection_info'] = active_connections[sid]
+            if device['is_online'] and device_id in active_connections:
+                device['connection_info'] = active_connections[device_id]
             
             if device_playback_state is not None:
                 playback_state = device_playback_state.get(device_id)
@@ -262,14 +260,13 @@ def init_admin_api(
                     "message": f"設備 {device_id} 不存在"
                 }), 404
             
-            # 如果設備在線，先斷開連接
+            # 如果設備在線，通知斷開
             if device_id in device_to_sid:
-                sid = device_to_sid[device_id]
                 try:
-                    socketio.emit('force_disconnect', {
+                    mqtt_bridge.publish_cmd(device_id, 'force_disconnect', {
                         'reason': '設備已被刪除'
-                    }, room=sid)
-                except:
+                    })
+                except Exception:
                     pass
             
             # 刪除設備
@@ -368,6 +365,26 @@ def init_admin_api(
                 "status": "error",
                 "message": "獲取播放狀態失敗"
             }), 500
+
+    @admin_api.route('/devices/<device_id>/commands/delete-local-video', methods=['POST'])
+    def delete_local_video_on_device(device_id):
+        """指示車機刪除本機影片檔（MQTT delete_local_video）。"""
+        try:
+            data = request.get_json() or {}
+            filename = data.get('video_filename') or data.get('filename')
+            if not filename:
+                return jsonify({"status": "error", "message": "缺少 video_filename"}), 400
+            if device_id not in device_to_sid:
+                return jsonify({"status": "error", "message": "設備離線"}), 400
+            mqtt_bridge.publish_cmd(device_id, 'delete_local_video', {
+                'video_filename': filename,
+                'timestamp': datetime.now().isoformat()
+            })
+            return jsonify({"status": "success", "message": "已發送刪除指令"}), 200
+        except Exception as e:
+            logger.error(f"delete_local_video_on_device: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+
     # ========================================================================
     # 廣告管理 API
     # ========================================================================
@@ -775,16 +792,14 @@ def init_admin_api(
                 
                 for device_id in affected_devices:
                     device_campaign_state[device_id] = None
-                    sid = device_to_sid.get(device_id)
-                    
-                    if sid:
+                    if device_id in device_to_sid:
                         try:
-                            socketio.emit('revert_to_local_playlist', {
+                            mqtt_bridge.publish_cmd(device_id, 'revert_to_local_playlist', {
                                 "command": "REVERT_TO_LOCAL_PLAYLIST",
                                 "reason": "campaign_deleted",
                                 "campaign_id": campaign_id,
                                 "timestamp": datetime.now().isoformat()
-                            }, room=sid)
+                            })
                         except Exception as emit_error:
                             logger.error(f"通知設備 {device_id} 活動刪除時出錯: {emit_error}")
             
@@ -2068,15 +2083,12 @@ def init_admin_api(
             offline_devices = []
             
             for device_id in target_device_ids:
-                sid = device_to_sid.get(device_id)
-                
-                if sid:
+                if device_id in device_to_sid:
                     try:
-                        # 發送下載命令到特定客戶端
-                        socketio.emit('download_video', download_command, room=sid)
+                        mqtt_bridge.publish_cmd(device_id, 'download_video', download_command)
                         sent_to.append(device_id)
                         connection_stats['messages_sent'] += 1
-                        logger.info(f"下載命令已發送到: {device_id} (SID: {sid})")
+                        logger.info(f"下載命令已發送到: {device_id} (MQTT)")
                     except Exception as e:
                         logger.error(f"發送到 {device_id} 時出錯: {e}")
                         offline_devices.append(device_id)
@@ -2234,11 +2246,9 @@ def init_admin_api(
                 offline_devices = []
                 
                 for device_id in target_device_ids:
-                    sid = device_to_sid.get(device_id)
-                    
-                    if sid:
+                    if device_id in device_to_sid:
                         try:
-                            socketio.emit('download_video', download_command, room=sid)
+                            mqtt_bridge.publish_cmd(device_id, 'download_video', download_command)
                             sent_to.append(device_id)
                             connection_stats['messages_sent'] += 1
                         except Exception as e:
@@ -2372,12 +2382,9 @@ def init_admin_api(
             offline_devices = []
             
             for device_id in target_device_ids:
-                sid = device_to_sid.get(device_id)
-                
-                if sid:
+                if device_id in device_to_sid:
                     try:
-                        # 發送覆蓋命令到特定客戶端
-                        socketio.emit('play_ad', payload, room=sid)
+                        mqtt_bridge.publish_cmd(device_id, 'play_ad', payload)
                         sent_to.append(device_id)
                         connection_stats['messages_sent'] += 1
                         if device_playback_state is not None:
@@ -2390,7 +2397,7 @@ def init_admin_api(
                                 "playlist": [],
                                 "updated_at": datetime.now().isoformat()
                             }
-                        logger.info(f"推送命令已發送到: {device_id} (SID: {sid})")
+                        logger.info(f"推送命令已發送到: {device_id} (MQTT)")
                     except Exception as e:
                         logger.error(f"發送到 {device_id} 時出錯: {e}")
                         offline_devices.append(device_id)
@@ -2550,17 +2557,8 @@ def init_admin_api(
             # if hasattr(db, 'qr_scans'):
             #     db.qr_scans.insert_one(scan_record)
             
-            # 通過 WebSocket 廣播給所有管理員（如果有的話）
-            try:
-                socketio.emit('qr_scan_event', {
-                    "type": "qr_scan",
-                    "message": "使用者掃描QRcode",
-                    "data": scan_record,
-                    "timestamp": datetime.now().isoformat()
-                }, namespace='/')
-                logger.debug("已通過 WebSocket 廣播 QR Code 掃描事件")
-            except Exception as ws_error:
-                logger.warning(f"WebSocket 廣播失敗: {ws_error}")
+            # MQTT：可選廣播給在線裝置（中控台若需即時可改為輪詢 REST）
+            logger.debug("QR Code 掃描事件已記錄（MQTT 廣播略）")
             
             return jsonify({
                 "status": "success",

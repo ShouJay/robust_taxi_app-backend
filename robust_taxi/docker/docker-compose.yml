@@ -1,6 +1,19 @@
 version: '3.8'
 
 services:
+  # MQTT Broker（裝置 cmd/evt 通道）
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: smart_taxi_mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+    networks:
+      - smart_taxi_network
+
   # MongoDB 數據庫
   mongodb:
     image: mongo:7.0
@@ -26,18 +39,22 @@ services:
       - "8080:8080"
     depends_on:
       - mongodb
+      - mosquitto
     environment:
       - MONGODB_URI=mongodb://mongodb:27017/
       - DATABASE_NAME=smart_taxi_ads
       - FLASK_HOST=0.0.0.0
       - FLASK_PORT=8080
       - FLASK_DEBUG=False
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
     command: python run_app.py
     networks:
       - smart_taxi_network
 
 volumes:
   mongodb_data:
+  mosquitto_data:
 
 networks:
   smart_taxi_network:

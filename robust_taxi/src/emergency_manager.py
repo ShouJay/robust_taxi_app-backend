@@ -18,11 +18,17 @@ class EmergencyManager:
         # 預設警報影片檔名，App 應預先下載此影片以達成秒級切換
         self.emergency_video_filename = "earthquake_alert.mp4" 
         self.qr_scan_count = 0
-        self.socketio = None
+        self.mqtt_bridge = None
+        self._online_device_ids = None  # callable -> list[str]，由 app 注入
         logger.info("EmergencyManager initialized")
 
+    def set_mqtt_bridge(self, mqtt_bridge, online_device_ids_callable=None):
+        self.mqtt_bridge = mqtt_bridge
+        self._online_device_ids = online_device_ids_callable
+
     def set_socketio(self, socketio):
-        self.socketio = socketio
+        """向後相容佔位（已改 MQTT）。"""
+        pass
 
     def trigger_alarm(self):
         if not self.is_alarm_active:
@@ -63,13 +69,24 @@ class EmergencyManager:
             "timestamp": datetime.now().isoformat()
         }
 
+    def _broadcast_cmd_all(self, event_type, payload):
+        if not self.mqtt_bridge:
+            return
+        ids = []
+        if self._online_device_ids:
+            try:
+                ids = list(self._online_device_ids()) or []
+            except Exception:
+                ids = []
+        for device_id in ids:
+            self.mqtt_bridge.publish_cmd(device_id, event_type, payload)
+
     def broadcast_state(self):
-        if self.socketio:
-            self.socketio.emit('system_state_update', self.get_state())
+        state = self.get_state()
+        self._broadcast_cmd_all('system_state_update', state)
 
     def broadcast_stats(self):
-        if self.socketio:
-            self.socketio.emit('stats_update', {
-                "qr_scan_count": self.qr_scan_count,
-                "timestamp": datetime.now().isoformat()
-            })
+        self._broadcast_cmd_all('stats_update', {
+            "qr_scan_count": self.qr_scan_count,
+            "timestamp": datetime.now().isoformat()
+        })

@@ -90,6 +90,7 @@ class PlaybackManager {
   // 內部狀態
   bool _isDisposed = false;
   bool _playbackCompletedHandled = false; // 防止重複處理播放完成
+  bool _advanceBusy = false; // 防止 _playNext 重入
 
   // 播放配置
   static const Duration _errorRetryDelay = Duration(seconds: 2);
@@ -194,6 +195,7 @@ class PlaybackManager {
     // 一般插入到隊列
     _queue.add(item);
     print('📥 廣告已加入隊列: $advertisementName (隊列長度: ${_queue.length})');
+    _emitPlaybackTelemetry();
 
     // 如果當前沒有在播放，立即播放（但不要在 loading 時打斷）
     if (_state == PlaybackState.idle || _state == PlaybackState.error) {
@@ -218,6 +220,13 @@ class PlaybackManager {
 
     // 清空一般隊列，活動播放優先
     _queue.clear();
+    _emitPlaybackTelemetry();
+    webSocketManager.sendPlaybackModeChange(
+      mode: playbackMode.name,
+      campaignId: campaignId,
+      reason: 'start_campaign',
+      previousMode: PlaybackMode.local.name,
+    );
 
     // 開始播放活動列表的第一個影片
     await _playCampaignItem();
@@ -243,6 +252,12 @@ class PlaybackManager {
     await refreshLocalPlaylist();
 
     // 開始本地播放
+    _emitPlaybackTelemetry();
+    webSocketManager.sendPlaybackModeChange(
+      mode: playbackMode.name,
+      reason: 'revert_local',
+      previousMode: PlaybackMode.campaign.name,
+    );
     if (_localPlaylist.isNotEmpty) {
       print('✅ 恢復到本地循環播放，列表有 ${_localPlaylist.length} 個影片');
       await _playNext();
@@ -350,49 +365,94 @@ class PlaybackManager {
     await _playItem(item);
   }
 
+  void _emitPlaybackTelemetry() {
+    if (_isDisposed) return;
+    try {
+      webSocketManager.sendPlaybackSnapshot({
+        'mode': playbackMode.name,
+        'playback_state': state.name,
+        'video_filename': _currentItem?.videoFilename,
+        'advertisement_id': _currentItem?.advertisementId,
+        'advertisement_name': _currentItem?.advertisementName,
+        'campaign_id': _activeCampaignId,
+        'playlist_index': _campaignPlaylistIndex,
+        'queue': _queue
+            .map(
+              (e) => {
+                'videoFilename': e.videoFilename,
+                'advertisementId': e.advertisementId,
+                'trigger': e.trigger,
+              },
+            )
+            .toList(),
+        'playlist': _campaignPlaylist
+            ?.map(
+              (e) => {
+                'videoFilename': e.videoFilename,
+                'advertisementId': e.advertisementId,
+              },
+            )
+            .toList(),
+        'local_playlist': _localPlaylist.map((e) => e.videoFilename).toList(),
+      });
+    } catch (e) {
+      print('⚠️ 上報播放快照失敗: $e');
+    }
+  }
+
   /// 播放下一個項目
   Future<void> _playNext() async {
     if (_isDisposed || !_isPlaybackEnabled) return;
+    if (_advanceBusy) {
+      print('⏳ 播放前進已在執行，略過重入');
+      return;
+    }
+    _advanceBusy = true;
 
     // 如果正在 loading，不要執行新的播放操作
     if (_state == PlaybackState.loading) {
       print('⏳ 正在載入中，等待載入完成...');
+      _advanceBusy = false;
       return;
     }
 
-    // 優先播放隊列中的項目
-    if (_queue.isNotEmpty) {
-      final item = _queue.removeAt(0);
-      await _playItem(item);
-      return;
+    try {
+      // 優先播放隊列中的項目
+      if (_queue.isNotEmpty) {
+        final item = _queue.removeAt(0);
+        await _playItem(item);
+        return;
+      }
+
+      // 活動播放模式：播放活動列表
+      if (_playbackMode == PlaybackMode.campaign && _campaignPlaylist != null) {
+        await _playCampaignItem();
+        return;
+      }
+
+      // 本地播放模式：循環播放本地列表
+      if (_localPlaylist.isNotEmpty) {
+        // 確保索引在有效範圍內（使用模運算實現循環）
+        _localPlaylistIndex = _localPlaylistIndex % _localPlaylist.length;
+        final item = _localPlaylist[_localPlaylistIndex];
+        final currentIndex = _localPlaylistIndex;
+        _localPlaylistIndex++; // 準備播放下一個
+
+        print(
+          '📺 播放本地影片 [${currentIndex + 1}/${_localPlaylist.length}]: ${item.advertisementName}',
+        );
+        print('   模式: $_playbackMode, 下一個索引: $_localPlaylistIndex');
+        await _playItem(item);
+        return;
+      }
+
+      print('⚠️ 本地播放列表為空，無法播放');
+
+      // 沒有可播放的項目
+      _setState(PlaybackState.idle);
+    } finally {
+      _advanceBusy = false;
     }
-
-    // 活動播放模式：播放活動列表
-    if (_playbackMode == PlaybackMode.campaign && _campaignPlaylist != null) {
-      await _playCampaignItem();
-      return;
-    }
-
-    // 本地播放模式：循環播放本地列表
-    if (_localPlaylist.isNotEmpty) {
-      // 確保索引在有效範圍內（使用模運算實現循環）
-      _localPlaylistIndex = _localPlaylistIndex % _localPlaylist.length;
-      final item = _localPlaylist[_localPlaylistIndex];
-      final currentIndex = _localPlaylistIndex;
-      _localPlaylistIndex++; // 準備播放下一個
-
-      print(
-        '📺 播放本地影片 [${currentIndex + 1}/${_localPlaylist.length}]: ${item.advertisementName}',
-      );
-      print('   模式: $_playbackMode, 下一個索引: $_localPlaylistIndex');
-      await _playItem(item);
-      return;
-    }
-
-    print('⚠️ 本地播放列表為空，無法播放');
-
-    // 沒有可播放的項目
-    _setState(PlaybackState.idle);
   }
 
   /// 播放指定項目
@@ -462,6 +522,19 @@ class PlaybackManager {
         _setState(PlaybackState.playing);
         print('✅ 影片播放開始: ${item.advertisementName}');
         print('   時長: ${controller.value.duration.inSeconds}s');
+
+        webSocketManager.sendPlaybackStarted(
+          mode: playbackMode.name,
+          advertisementId: item.advertisementId,
+          videoFilename: item.videoFilename,
+          campaignId: item.campaignId ?? _activeCampaignId,
+          trigger: item.trigger,
+          playlistIndex: _playbackMode == PlaybackMode.campaign && _campaignPlaylist != null
+              ? _campaignPlaylistIndex
+              : null,
+          playlistLength: _campaignPlaylist?.length,
+        );
+        _emitPlaybackTelemetry();
 
         // loading 完成後，檢查隊列中是否有待播放項目（特別是覆蓋播放）
         // 如果隊列中有項目，但當前項目不是覆蓋播放，則繼續播放當前項目
@@ -535,6 +608,25 @@ class PlaybackManager {
         print(
           '   播放進度: ${((position.inMilliseconds / duration.inMilliseconds) * 100).toStringAsFixed(1)}%',
         );
+
+        final completed = _currentItem;
+        if (completed != null) {
+          webSocketManager.sendPlaybackCompleted(
+            mode: playbackMode.name,
+            advertisementId: completed.advertisementId,
+            videoFilename: completed.videoFilename,
+            campaignId: completed.campaignId ?? _activeCampaignId,
+            trigger: completed.trigger,
+            playlistIndex: _playbackMode == PlaybackMode.campaign && _campaignPlaylist != null
+                ? _campaignPlaylistIndex
+                : null,
+            playlistLength: _campaignPlaylist?.length,
+            nextPlaylistIndex: _playbackMode == PlaybackMode.campaign && _campaignPlaylist != null
+                ? _campaignPlaylistIndex + 1
+                : null,
+            playbackDuration: duration,
+          );
+        }
 
         // 移除監聽器，避免重複觸發
         controller.removeListener(_onVideoControllerUpdate);

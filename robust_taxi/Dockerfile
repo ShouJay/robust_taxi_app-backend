@@ -30,4 +30,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # CMD ["python", "run_app.py"]
 
 # 運行應用程序 (使用 Gunicorn)
-CMD ["gunicorn", "--worker-class", "eventlet", "-w", "1", "-b", "0.0.0.0:8080", "src.app:app", "--access-logfile", "-", "--error-logfile", "-"]
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:8080", "src.app:app", "--access-logfile", "-", "--error-logfile", "-"]

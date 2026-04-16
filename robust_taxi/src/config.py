@@ -22,3 +22,12 @@ DEFAULT_VIDEO = os.getenv('DEFAULT_VIDEO', 'default_ad_loop.mp4')
 # 日誌配置
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 
+# MQTT（與 Mosquitto / 其他 Broker 相容）
+MQTT_HOST = os.getenv('MQTT_HOST', 'localhost')
+MQTT_PORT = int(os.getenv('MQTT_PORT', '1883'))
+MQTT_USER = os.getenv('MQTT_USER', '') or ''
+MQTT_PASSWORD = os.getenv('MQTT_PASSWORD', '') or ''
+MQTT_TOPIC_PREFIX = os.getenv('MQTT_TOPIC_PREFIX', 'taxi')
+# 後端作為 client 的 client_id（可覆寫避免多實例衝突）
+MQTT_CLIENT_ID = os.getenv('MQTT_CLIENT_ID', 'robust_taxi_backend')
+
