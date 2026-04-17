@@ -18,8 +18,10 @@ void main() {
   // 設置全螢幕模式
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-  // 設置橫向模式
-  SystemChrome.setPreferredOrientations([
+  // 允許直立與橫向，主畫面會依螢幕方向自動調整影片顯示
+  SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
     DeviceOrientation.landscapeLeft,
     DeviceOrientation.landscapeRight,
   ]);
@@ -277,7 +279,7 @@ class _AppContainerState extends State<AppContainer>
     // 開始下載
     final success = await _downloadManager.startDownload(
       advertisementId: command.advertisementId,
-      onProgress: (task) {
+      onProgress: (task) async {
         // 發送下載進度
         _webSocketManager.sendDownloadStatus(
           advertisementId: task.advertisementId,
@@ -288,22 +290,10 @@ class _AppContainerState extends State<AppContainer>
           errorMessage: task.errorMessage,
         );
 
-        // 下載完成後刷新本地播放列表並加入隊列
+        // 下載完成：僅更新本地循環列表，不插隊插播（新片納入本地輪播）
         if (task.status == DownloadStatus.completed) {
           print('✅ 下載完成: ${command.videoFilename}');
-
-          // 刷新本地影片列表
-          _playbackManager.refreshLocalPlaylist();
-
-          // 加入播放隊列
-          _playbackManager.insertAd(
-            videoFilename: command.videoFilename,
-            advertisementId: command.advertisementId,
-            advertisementName: command.advertisementName,
-            isOverride: false,
-            trigger: command.trigger,
-            campaignId: command.campaignId,
-          );
+          await _playbackManager.refreshLocalPlaylistAfterDownload();
         }
       },
     );

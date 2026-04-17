@@ -35,6 +35,9 @@ class AppConfig {
   static const String defaultDeviceId = 'taxi-AAB-1234-rooftop';
   static const String adminModeKey = 'admin_mode';
 
+  /// 使用者是否啟用循環播放（出廠未設定時，僅在本地有影片時預設為啟用）
+  static const String playbackEnabledKey = 'playback_enabled';
+
   // 播放配置
   static const int tapCountToSettings = 5;
   static const Duration tapDetectionWindow = Duration(seconds: 3);

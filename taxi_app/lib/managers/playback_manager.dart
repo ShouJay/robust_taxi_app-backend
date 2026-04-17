@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
+import '../config/app_config.dart';
 import '../services/download_manager.dart';
 import '../services/websocket_manager.dart';
 
@@ -79,8 +81,17 @@ class PlaybackManager {
   // 位置觸發的廣告（追蹤最後一次位置觸發的廣告，用於過期清理）
   final Map<String, DateTime> _locationBasedAds = {};
 
-  // 播放啟用狀態
-  bool _isPlaybackEnabled = true;
+  // 播放啟用狀態（出廠／無本地影片時由 _syncPlaybackEnabledWithPrefsAndPlaylist 設為 false）
+  bool _isPlaybackEnabled = false;
+
+  /// 使用者或管理員主動暫停（與播放到片尾區分，避免片尾暫停被誤判為「播完」）
+  bool _userPausedPlayback = false;
+
+  /// 錯誤後只排程一次恢復播放
+  bool _playbackErrorRecoveryScheduled = false;
+
+  /// 活動模式連續缺檔次數（避免同一缺檔無限重試）
+  int _campaignMissingFileStreak = 0;
 
   // 狀態監聽器
   Function(PlaybackState)? onStateChanged;
@@ -93,6 +104,7 @@ class PlaybackManager {
 
   // 播放配置
   static const Duration _errorRetryDelay = Duration(seconds: 2);
+  static const Duration _playbackEndTolerance = Duration(milliseconds: 400);
 
   PlaybackManager({
     required this.downloadManager,
@@ -108,7 +120,7 @@ class PlaybackManager {
   bool get isPlaybackEnabled => _isPlaybackEnabled;
   String? get activeCampaignId => _activeCampaignId;
 
-  /// 初始化並開始自動播放
+  /// 初始化並開始自動播放（依 SharedPreferences 與本地是否有影片決定是否啟用播放）
   Future<void> startAutoPlay() async {
     if (_isDisposed) return;
 
@@ -119,14 +131,48 @@ class PlaybackManager {
     _localPlaylistIndex = 0;
 
     await refreshLocalPlaylist();
+    await _syncPlaybackEnabledWithPrefsAndPlaylist();
 
     if (_localPlaylist.isNotEmpty) {
-      print('✅ 找到 ${_localPlaylist.length} 個本地影片，開始循環播放');
-      await _playNext();
+      print('✅ 找到 ${_localPlaylist.length} 個本地影片');
+      if (_isPlaybackEnabled) {
+        await _playNext();
+      } else {
+        print('⚠️ 播放未啟用（無本地影片出廠預設，或使用者已關閉）');
+        _setState(PlaybackState.idle);
+      }
     } else {
       print('⚠️ 沒有找到本地影片');
       _setState(PlaybackState.idle);
     }
+  }
+
+  /// 依偏好與本地列表同步「是否啟用播放」：
+  /// - 本地無任何影片 → 一律不啟用
+  /// - 尚未寫入過 playback_enabled → 有影片則啟用、無影片則不啟用（出廠）
+  /// - 已寫入過 → 依使用者儲存的值
+  Future<void> _syncPlaybackEnabledWithPrefsAndPlaylist() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_localPlaylist.isEmpty) {
+      _isPlaybackEnabled = false;
+    } else if (prefs.containsKey(AppConfig.playbackEnabledKey)) {
+      _isPlaybackEnabled = prefs.getBool(AppConfig.playbackEnabledKey) ?? false;
+    } else {
+      _isPlaybackEnabled = true;
+    }
+    onPlaybackEnabledChanged?.call(_isPlaybackEnabled);
+  }
+
+  /// 下載完成後僅更新本地循環列表，不插隊插播；必要時在閒置狀態下開始循環
+  Future<void> refreshLocalPlaylistAfterDownload() async {
+    if (_isDisposed) return;
+    await refreshLocalPlaylist();
+    await _syncPlaybackEnabledWithPrefsAndPlaylist();
+    if (!_isPlaybackEnabled) return;
+    if (_state != PlaybackState.idle && _state != PlaybackState.error) return;
+    if (_queue.isNotEmpty) return;
+    if (_localPlaylist.isEmpty) return;
+    await _playNext();
   }
 
   /// 刷新本地播放列表
@@ -172,14 +218,12 @@ class PlaybackManager {
       isOverride: isOverride,
     );
 
-    // 覆蓋播放：立即清除隊列並播放
+    // 覆蓋播放：立即清除隊列並播放（若正在載入，佇列保留，於 initialize 完成後改播覆蓋）
     if (isOverride) {
       print('🚨 覆蓋播放: $advertisementName');
       _queue.clear();
       _queue.add(item);
-      // 如果正在 loading，等待完成後再播放
       if (_state == PlaybackState.loading) {
-        // 將覆蓋項目加入隊列，等待當前 loading 完成
         return;
       }
       await _playNext();
@@ -213,6 +257,7 @@ class PlaybackManager {
 
     _campaignPlaylist = playlist;
     _campaignPlaylistIndex = 0;
+    _campaignMissingFileStreak = 0;
     _activeCampaignId = campaignId;
     _playbackMode = PlaybackMode.campaign;
 
@@ -241,9 +286,10 @@ class PlaybackManager {
 
     // 確保本地播放列表是最新的
     await refreshLocalPlaylist();
+    await _syncPlaybackEnabledWithPrefsAndPlaylist();
 
     // 開始本地播放
-    if (_localPlaylist.isNotEmpty) {
+    if (_localPlaylist.isNotEmpty && _isPlaybackEnabled) {
       print('✅ 恢復到本地循環播放，列表有 ${_localPlaylist.length} 個影片');
       await _playNext();
     } else {
@@ -276,27 +322,28 @@ class PlaybackManager {
     }
   }
 
-  /// 設置播放啟用狀態
+  /// 設置播放啟用狀態（寫入 SharedPreferences，供出廠／重啟後還原）
   Future<void> setPlaybackEnabled(bool enabled) async {
     if (_isDisposed) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(AppConfig.playbackEnabledKey, enabled);
 
     _isPlaybackEnabled = enabled;
     onPlaybackEnabledChanged?.call(enabled);
 
-    // 如果正在 loading，不要改變狀態，等待載入完成
+    // 如果正在 loading，偏好已寫入，待載入完成後於 _playItem 依 enabled 決定 play 或 paused
     if (_state == PlaybackState.loading) {
-      print('⏳ 正在載入中，等待載入完成後再改變播放狀態');
+      print('⏳ 正在載入中，載入完成後套用播放開關');
       return;
     }
 
     if (!enabled) {
-      // 停用：暫停當前播放
       await pause();
     } else {
-      // 啟用：恢復播放或開始播放
       if (_state == PlaybackState.paused) {
         await resume();
-      } else if (_state == PlaybackState.idle) {
+      } else if (_state == PlaybackState.idle || _state == PlaybackState.error) {
         await _playNext();
       }
     }
@@ -313,6 +360,7 @@ class PlaybackManager {
     }
 
     if (_state == PlaybackState.playing) {
+      _userPausedPlayback = true;
       await _currentController!.pause();
       _setState(PlaybackState.paused);
     }
@@ -329,6 +377,7 @@ class PlaybackManager {
     }
 
     if (_state == PlaybackState.paused && _isPlaybackEnabled) {
+      _userPausedPlayback = false;
       await _currentController!.play();
       _setState(PlaybackState.playing);
     }
@@ -411,16 +460,28 @@ class PlaybackManager {
     final exists = await downloadManager.isVideoExists(item.videoFilename);
     if (!exists) {
       print('❌ 影片不存在: ${item.videoFilename}');
-      _setState(PlaybackState.error);
-
-      // 延遲後嘗試播放下一個
-      Future.delayed(_errorRetryDelay, () {
-        if (!_isDisposed) {
-          _playNext();
+      if (_playbackMode == PlaybackMode.campaign && _campaignPlaylist != null) {
+        _campaignMissingFileStreak++;
+        if (_campaignMissingFileStreak >= _campaignPlaylist!.length) {
+          _campaignMissingFileStreak = 0;
+          print('❌ 活動列表連續缺檔，改回本地循環');
+          await revertToLocalPlayback();
+          return;
         }
-      });
+        _campaignPlaylistIndex =
+            (_campaignPlaylistIndex + 1) % _campaignPlaylist!.length;
+        Future.microtask(() {
+          if (!_isDisposed) _playNext();
+        });
+        return;
+      }
+
+      _setState(PlaybackState.error);
+      _schedulePlaybackErrorRecovery();
       return;
     }
+
+    _campaignMissingFileStreak = 0;
 
     // 獲取影片路徑
     final videoPath = await downloadManager.getVideoPath(item.videoFilename);
@@ -439,6 +500,16 @@ class PlaybackManager {
       // 初始化控制器
       await controller.initialize();
 
+      // 載入期間若收到覆蓋播放：放棄當前項目，改播隊列中的覆蓋項目
+      if (_queue.isNotEmpty && _queue.first.isOverride) {
+        print('🚨 覆蓋播放到達，中止當前載入項目');
+        await controller.dispose();
+        _setCurrentItem(null);
+        _setState(PlaybackState.idle);
+        await _playNext();
+        return;
+      }
+
       // 本地循環播放：單個影片不循環，讓列表循環（通過播放完成後播放下一個實現）
       // 這樣可以實現：影片1 → 影片2 → ... → 影片N → 影片1 → ... 的循環效果
       // 如果設置單個影片循環，會導致同一個影片重複播放，無法切換到下一個
@@ -452,20 +523,17 @@ class PlaybackManager {
 
       // 重置播放完成標記
       _playbackCompletedHandled = false;
+      _userPausedPlayback = false;
 
       // 監聽播放完成事件
       controller.addListener(_onVideoControllerUpdate);
 
-      // 開始播放
+      // 開始播放（載入期間若已變更播放開關，此處讀取最新 _isPlaybackEnabled）
       if (_isPlaybackEnabled) {
         await controller.play();
         _setState(PlaybackState.playing);
         print('✅ 影片播放開始: ${item.advertisementName}');
         print('   時長: ${controller.value.duration.inSeconds}s');
-
-        // loading 完成後，檢查隊列中是否有待播放項目（特別是覆蓋播放）
-        // 如果隊列中有項目，但當前項目不是覆蓋播放，則繼續播放當前項目
-        // 覆蓋播放會在下一個週期自動處理
       } else {
         _setState(PlaybackState.paused);
       }
@@ -474,14 +542,19 @@ class PlaybackManager {
       _setState(PlaybackState.error);
       _currentController?.dispose();
       _currentController = null;
-
-      // 延遲後嘗試播放下一個
-      Future.delayed(_errorRetryDelay, () {
-        if (!_isDisposed) {
-          _playNext();
-        }
-      });
+      _schedulePlaybackErrorRecovery();
     }
+  }
+
+  void _schedulePlaybackErrorRecovery() {
+    if (_playbackErrorRecoveryScheduled || _isDisposed) return;
+    _playbackErrorRecoveryScheduled = true;
+    Future.delayed(_errorRetryDelay, () {
+      _playbackErrorRecoveryScheduled = false;
+      if (!_isDisposed) {
+        _playNext();
+      }
+    });
   }
 
   /// 視頻控制器更新監聽
@@ -491,65 +564,62 @@ class PlaybackManager {
     final controller = _currentController!;
     final value = controller.value;
 
-    // 檢查錯誤
+    // 檢查錯誤（只處理一次，避免 listener 風暴重複排程）
     if (value.hasError) {
+      if (_playbackErrorRecoveryScheduled) return;
+      _playbackErrorRecoveryScheduled = true;
       print('❌ 播放器錯誤: ${value.errorDescription}');
+      controller.removeListener(_onVideoControllerUpdate);
       _setState(PlaybackState.error);
-
-      // 延遲後嘗試播放下一個
-      Future.delayed(_errorRetryDelay, () {
-        if (!_isDisposed) {
-          _playNext();
+      Future.microtask(() async {
+        try {
+          await controller.dispose();
+        } catch (_) {}
+        if (_currentController == controller) {
+          _currentController = null;
         }
+        Future.delayed(_errorRetryDelay, () {
+          _playbackErrorRecoveryScheduled = false;
+          if (!_isDisposed) {
+            _playNext();
+          }
+        });
       });
       return;
     }
 
-    // 檢查播放完成（使用播放器狀態判定）
-    // 防止重複處理
     if (_playbackCompletedHandled) {
       return;
     }
 
-    // 使用播放器狀態判定播放完成：
-    // 1. 不是循環播放
-    // 2. 影片已初始化且有有效的時長
-    // 3. 播放器已停止播放（isPlaying == false）
-    // 4. 位置達到或接近結尾（確認是自然播放完成，而非手動暫停）
+    // 自然播完：已停止、非使用者暫停、位置已達片尾（容許解碼誤差）
     if (!value.isLooping &&
         value.isInitialized &&
         value.duration > Duration.zero &&
-        !value.isPlaying) {
-      // 確認是播放完成而非暫停：位置必須達到總時長的 90% 以上
+        !value.isPlaying &&
+        !_userPausedPlayback) {
       final position = value.position;
       final duration = value.duration;
-      final isNearEnd = position >= duration * 0.9;
+      final atEnd =
+          duration >= _playbackEndTolerance
+              ? position >= duration - _playbackEndTolerance
+              : position >= duration;
 
-      if (isNearEnd) {
-        // 防止重複觸發
+      if (atEnd) {
         _playbackCompletedHandled = true;
 
         print('✅ 影片播放完成（狀態判定）: ${_currentItem?.advertisementName}');
-        print('   播放狀態: 已停止');
         print('   位置: ${position.inSeconds}s / 總時長: ${duration.inSeconds}s');
-        print(
-          '   播放進度: ${((position.inMilliseconds / duration.inMilliseconds) * 100).toStringAsFixed(1)}%',
-        );
 
-        // 移除監聽器，避免重複觸發
         controller.removeListener(_onVideoControllerUpdate);
 
-        // 播放完成後，繼續播放下一個
         Future.delayed(const Duration(milliseconds: 100), () {
           if (!_isDisposed) {
-            // 如果是活動播放，移動到下一個
             if (_playbackMode == PlaybackMode.campaign &&
                 _campaignPlaylist != null) {
               _campaignPlaylistIndex++;
               _playCampaignItem();
             } else {
-              // 本地循環模式或其他模式：播放下一個
-              // _playNext() 會自動處理本地列表的循環（索引會自動重置）
               print('🔄 播放完成，準備播放下一個（模式: $_playbackMode）');
               _playNext();
             }
@@ -573,8 +643,8 @@ class PlaybackManager {
       print('⚠️ 停止播放時發生錯誤: $e');
     } finally {
       _currentController = null;
-      // 重置播放完成標記
       _playbackCompletedHandled = false;
+      _userPausedPlayback = false;
     }
   }
 
@@ -671,15 +741,16 @@ class PlaybackManager {
         _setState(PlaybackState.idle);
       }
 
-      // 從本地播放列表中移除
-      _localPlaylist.removeWhere((item) => item.videoFilename == filename);
-
-      // 刪除檔案
+      // 刪除檔案並與磁碟同步播放列表／播放開關
       await file.delete();
       print('✅ 影片已刪除: $filename');
 
-      // 如果當前沒有播放，嘗試播放下一個
-      if (_state == PlaybackState.idle && _localPlaylist.isNotEmpty) {
+      await refreshLocalPlaylist();
+      await _syncPlaybackEnabledWithPrefsAndPlaylist();
+
+      if (_state == PlaybackState.idle &&
+          _localPlaylist.isNotEmpty &&
+          _isPlaybackEnabled) {
         await _playNext();
       }
 

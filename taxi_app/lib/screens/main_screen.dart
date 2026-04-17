@@ -33,6 +33,9 @@ class _MainScreenState extends State<MainScreen> {
   int _tapCount = 0;
   DateTime? _firstTapTime;
 
+  /// 管理員手動額外旋轉（0–3 個 90°，與自動直立/橫向邏輯疊加）
+  int _adminManualExtraQuarterTurns = 0;
+
   @override
   void initState() {
     super.initState();
@@ -94,7 +97,85 @@ class _MainScreenState extends State<MainScreen> {
 
             if (widget.isAdminMode)
               Positioned(left: 20, bottom: 40, child: _buildAdminInfoPanel()),
+
+            // 管理員：手動畫面旋轉（疊加在自動邏輯之上）
+            if (widget.isAdminMode) _buildRotationControlsOverlay(),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 有影片可播時顯示右下角旋轉控制
+  Widget _buildRotationControlsOverlay() {
+    final controller = widget.playbackManager.controller;
+    final state = widget.playbackManager.state;
+    final showVideo =
+        controller != null &&
+        controller.value.isInitialized &&
+        state != PlaybackState.idle &&
+        state != PlaybackState.error &&
+        state != PlaybackState.loading;
+
+    if (!showVideo) return const SizedBox.shrink();
+
+    return Positioned(
+      right: 16,
+      bottom: 100,
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.72),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.blueAccent.withOpacity(0.5)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              const Text(
+                '畫面旋轉',
+                style: TextStyle(
+                  color: Colors.blueAccent,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.rotate_right, color: Colors.white),
+                    tooltip: '額外順時針 90°',
+                    onPressed: () {
+                      setState(() {
+                        _adminManualExtraQuarterTurns =
+                            (_adminManualExtraQuarterTurns + 1) % 4;
+                      });
+                    },
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _adminManualExtraQuarterTurns = 0;
+                      });
+                    },
+                    child: const Text(
+                      '重置',
+                      style: TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                '額外旋轉 ${_adminManualExtraQuarterTurns * 90}°（可與自動搭配）',
+                style: const TextStyle(color: Colors.white54, fontSize: 11),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -123,10 +204,39 @@ class _MainScreenState extends State<MainScreen> {
       return const SizedBox.expand(child: ColoredBox(color: Colors.black));
     }
 
-    // 顯示影片
-    return AspectRatio(
-      aspectRatio: controller.value.aspectRatio,
-      child: VideoPlayer(controller, key: ValueKey(controller)),
+    // 顯示影片：維持原片比例（contain），直立＋橫向片時自動轉向；管理員可額外旋轉
+    return SizedBox.expand(
+      child: _buildAdaptiveVideo(controller),
+    );
+  }
+
+  /// 依螢幕方向與影片比例自動旋轉／縮放；[BoxFit.contain] 保留完整畫面不裁切
+  /// 管理員可額外疊加 0°–270°（每按一次 +90°）
+  Widget _buildAdaptiveVideo(VideoPlayerController controller) {
+    final size = controller.value.size;
+    final ar = controller.value.aspectRatio;
+    final orientation = MediaQuery.orientationOf(context);
+    final portrait = orientation == Orientation.portrait;
+    final landscapeVideo = ar >= 1.0;
+
+    final int autoQuarterTurns = (portrait && landscapeVideo) ? 1 : 0;
+    final int totalQuarterTurns =
+        (autoQuarterTurns + _adminManualExtraQuarterTurns) % 4;
+
+    final video = VideoPlayer(controller, key: ValueKey(controller));
+
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          alignment: Alignment.center,
+          child: RotatedBox(
+            quarterTurns: totalQuarterTurns,
+            child: SizedBox(width: size.width, height: size.height, child: video),
+          ),
+        ),
+      ),
     );
   }
 
